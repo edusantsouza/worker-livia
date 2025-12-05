@@ -15,11 +15,23 @@ export default {
  */
 async function handleKiwifyWebhook(request, env) {
   try {
+    if (!env.MAILERLITE_API_KEY) {
+      return new Response("Missing MAILERLITE_API_KEY", { status: 500 });
+    }
     const bodyText = await request.text();
 
     // Se a Kiwify enviar assinatura / segredo, aqui seria o lugar de validar.
     // Por enquanto, assumimos que o payload é confiável.
     const payload = JSON.parse(bodyText);
+    const tokenExpected = env.KIWIFY_WEBHOOK_TOKEN || env.KIWIFY_TOKEN || null;
+    const tokenProvided =
+      request.headers.get("x-kiwify-token") ||
+      request.headers.get("x-token") ||
+      payload.token ||
+      null;
+    if (tokenExpected && tokenProvided !== tokenExpected) {
+      return new Response("Unauthorized", { status: 401 });
+    }
 
     // Estrutura esperada (ajuste conforme o formato real do webhook da Kiwify)
     const eventType = payload.event; // ex: "order.approved", "order.refunded", "checkout.abandoned"
