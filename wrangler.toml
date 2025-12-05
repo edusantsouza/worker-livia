@@ -1,0 +1,4 @@
+name = "worker-livia"
+main = "main.js"
+compatibility_date = "2025-12-05"
+workers_dev = true
