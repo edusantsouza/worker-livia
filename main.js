@@ -47,7 +47,11 @@ async function handleKiwifyWebhook(request, env) {
     }
 
     // Mapeia ID de produto Kiwify para grupos/tags do MailerLite
-    const productConfig = mapProduct(productId);
+    const productConfig = resolveProductConfig(productId, env);
+    if (!productConfig) {
+      console.log("Produto desconhecido ignorado:", productId);
+      return new Response("Ignored unknown product", { status: 202 });
+    }
 
     // Decide o que fazer com base no tipo de evento
     switch (eventType) {
@@ -104,32 +108,37 @@ function mapProduct(productId) {
   // Ajuste estas configs para os IDs reais de produto na Kiwify
   // e os nomes dos grupos/tags no MailerLite
   const mapping = {
-    "12345": {
-      name: "Planner Inglês 30 Dias",
-      groupClient: "Clientes – Planner Inglês",
-      groupCartRecovery: "Recuperação Carrinho – Planner Inglês",
-      tagBought: "comprou_produto_planner_ingles",
-      tagRefund: "refund_planner_ingles",
-      tagAbandonedCart: "abandonou_carrinho_planner_ingles",
+    "5fade7e0-f9ee-11ef-af9f-2d476897d216": {
+      name: "Planner Inglês em 30 dias",
+      groupClient: "Cliente - Planner Inglês em 30 dias",
+      groupCartRecovery: "Carrinho Abandonado - Planner Inglês em 30 dias",
     },
-    "67890": {
-      name: "Produto Y",
-      groupClient: "Clientes – Produto Y",
-      groupCartRecovery: "Recuperação Carrinho – Produto Y",
-      tagBought: "comprou_produto_Y",
-      tagRefund: "refund_produto_Y",
-      tagAbandonedCart: "abandonou_carrinho_produto_Y",
+    "d801b010-cac6-11f0-921a-c7290f9eeec5": {
+      name: "Guia do Poliglota",
+      groupClient: "Cliente - Guia do Poliglota",
+      groupCartRecovery: "Carrinho Abandonado - Guia do Poliglota",
     },
   };
 
-  return mapping[productId] || {
+  const cfg = mapping[productId];
+  if (cfg) return cfg;
+  return {
     name: "Produto Desconhecido",
     groupClient: "Clientes – Outros",
     groupCartRecovery: "Recuperação Carrinho – Outros",
     tagBought: "comprou_produto_desconhecido",
     tagRefund: "refund_produto_desconhecido",
     tagAbandonedCart: "abandonou_carrinho_desconhecido",
+    __isUnknown: true,
   };
+}
+
+function resolveProductConfig(productId, env) {
+  const cfg = mapProduct(productId);
+  if (cfg && cfg.__isUnknown && env.PROCESS_UNKNOWN_PRODUCTS !== "true") {
+    return null;
+  }
+  return cfg;
 }
 
 /**
@@ -210,6 +219,10 @@ async function upsertSubscriberInMailerLite(
 ) {
   const apiKey = env.MAILERLITE_API_KEY;
   const baseUrl = "https://connect.mailerlite.com/api";
+  if (env.MAILERLITE_DRY_RUN === "true") {
+    console.log("MAILERLITE_DRY_RUN ativo: nenhuma modificação será aplicada para", email);
+    return;
+  }
 
   // 1. Tenta buscar o subscriber existente
   const existing = await fetch(`${baseUrl}/subscribers/${encodeURIComponent(email)}`, {
@@ -254,33 +267,34 @@ async function upsertSubscriberInMailerLite(
   }
 
   // 2. Adicionar/remover grupos
-  for (const groupName of groupsToAdd) {
-    await addSubscriberToGroup(apiKey, subscriberId, groupName);
+  for (const groupRef of groupsToAdd) {
+    await addSubscriberToGroup(apiKey, subscriberId, groupRef);
   }
 
-  for (const groupName of groupsToRemove) {
-    await removeSubscriberFromGroup(apiKey, subscriberId, groupName);
+  for (const groupRef of groupsToRemove) {
+    await removeSubscriberFromGroup(apiKey, subscriberId, groupRef);
   }
 
   // 3. Adicionar/remover tags
-  for (const tag of tagsToAdd) {
-    await addTagToSubscriber(apiKey, subscriberId, tag);
-  }
-
-  for (const tag of tagsToRemove) {
-    await removeTagFromSubscriber(apiKey, subscriberId, tag);
+  if (env.USE_TAGS === "true") {
+    for (const tag of tagsToAdd) {
+      await addTagToSubscriber(apiKey, subscriberId, tag);
+    }
+    for (const tag of tagsToRemove) {
+      await removeTagFromSubscriber(apiKey, subscriberId, tag);
+    }
   }
 }
 
 /**
  * Helper: adiciona subscriber a grupo pelo nome (você pode otimizar usando cache de IDs de grupos)
  */
-async function addSubscriberToGroup(apiKey, subscriberId, groupName) {
+async function addSubscriberToGroup(apiKey, subscriberId, groupRef) {
   const baseUrl = "https://connect.mailerlite.com/api";
-  const groupId = await findGroupId(apiKey, groupName);
+  const groupId = await getGroupId(apiKey, groupRef);
 
   if (!groupId) {
-    console.error("Grupo não encontrado:", groupName);
+    console.error("Grupo não encontrado:", typeof groupRef === "string" ? groupRef : groupRef?.name || groupRef?.id);
     return;
   }
 
@@ -297,12 +311,12 @@ async function addSubscriberToGroup(apiKey, subscriberId, groupName) {
 /**
  * Helper: remove subscriber de grupo
  */
-async function removeSubscriberFromGroup(apiKey, subscriberId, groupName) {
+async function removeSubscriberFromGroup(apiKey, subscriberId, groupRef) {
   const baseUrl = "https://connect.mailerlite.com/api";
-  const groupId = await findGroupId(apiKey, groupName);
+  const groupId = await getGroupId(apiKey, groupRef);
 
   if (!groupId) {
-    console.error("Grupo não encontrado:", groupName);
+    console.error("Grupo não encontrado:", typeof groupRef === "string" ? groupRef : groupRef?.name || groupRef?.id);
     return;
   }
 
@@ -326,6 +340,14 @@ async function findGroupId(apiKey, groupName) {
   }
   const payload = await res.json();
   return payload?.data?.[0]?.id || null;
+}
+
+async function getGroupId(apiKey, groupRef) {
+  if (!groupRef) return null;
+  if (typeof groupRef === "object" && groupRef.id) return groupRef.id;
+  const name = typeof groupRef === "string" ? groupRef : groupRef.name;
+  if (!name) return null;
+  return await findGroupId(apiKey, name);
 }
 
 /**
